@@ -11,6 +11,7 @@ dist/
 .env.*
 *.pem
 *.key
+.gitignore
 
 # OS/editor junk
 .DS_Store
