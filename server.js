@@ -6,7 +6,7 @@ require("dotenv").config();
 
 const app = express();
 
-// CORS — allow your website to call the API
+// ✅ CORS — allow your website to call the API
 const allowed = process.env.ALLOWED_ORIGIN?.split(",").map(s => s.trim());
 app.use(cors({
   origin: (origin, cb) => {
@@ -17,7 +17,10 @@ app.use(cors({
 
 app.use(express.json({ limit: "100kb" }));
 
-// Basic rate limit to stop spam bursts
+// ✅ Optional: serve static assets if you add a /public folder later
+app.use(express.static("public"));
+
+// ✅ Basic rate limit to stop spam bursts
 app.use("/api/contact", rateLimit({ windowMs: 60_000, max: 5 }));
 
 const clean = (s = "") => String(s).trim().replace(/\s+/g, " ");
@@ -29,10 +32,11 @@ const transporter = nodemailer.createTransport({
   auth: { user: process.env.MAIL_USER, pass: process.env.MAIL_PASS },
 });
 
+// ✅ Contact form endpoint
 app.post("/api/contact", async (req, res) => {
   const { name, email, message, website } = req.body || {};
 
-  // Honeypot: bots often fill hidden "website" field
+  // Honeypot to block bots
   if (website) return res.status(200).json({ ok: true });
 
   if (!email || !message) {
@@ -49,7 +53,7 @@ app.post("/api/contact", async (req, res) => {
     await transporter.sendMail({
       from: `TicketVeriGuard Contact <${process.env.MAIL_USER}>`,
       to: process.env.RCPT_TO,
-      replyTo: fromEmail, // replying goes to the sender
+      replyTo: fromEmail,
       subject: `New website inquiry from ${fromName}`,
       text: bodyText,
       html: bodyHtml,
@@ -71,8 +75,14 @@ app.post("/api/contact", async (req, res) => {
   }
 });
 
-// Health check
+// ✅ Health check endpoint (useful for debugging)
 app.get("/api/health", (req, res) => res.json({ ok: true }));
 
+// ✅ Root route so "/" stops 404ing in Heroku logs
+app.get("/", (req, res) => {
+  res.send("tvg-contact is running ✅ — try POST /api/contact");
+});
+
+// ✅ Start server
 const port = process.env.PORT || 3001;
 app.listen(port, () => console.log(`API on :${port}`));
