@@ -1,55 +1,69 @@
-// server.js
+/**
+ * TicketVeriGuard — Contact API
+ * Minimal, reliable, branded-but-clean email notifications.
+ *
+ * ENV (set on Heroku):
+ *  - PORT
+ *  - MAIL_USER           hello@ticketveriguard.com
+ *  - MAIL_PASS           <16-char Google App Password>
+ *  - RCPT_TO             hello@ticketveriguard.com
+ *  - FROM_NAME           TicketVeriGuard
+ *  - ALLOWED_ORIGIN      https://ticketveriguard.com
+ *  - CORS_ORIGINS        https://ticketveriguard.com,https://www.ticketveriguard.com,http://localhost:5500
+ */
+
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 
-const {
-  PORT = 3001,
-  MAIL_USER,
-  MAIL_PASS,
-  RCPT_TO,
-  FROM_NAME = 'TicketVeriGuard',
-  ALLOWED_ORIGIN,
-  CORS_ORIGINS = ''
-} = process.env;
-
-if (!MAIL_USER || !MAIL_PASS || !RCPT_TO) {
-  console.error('Missing MAIL_USER/MAIL_PASS/RCPT_TO envs');
-}
-
 const app = express();
 
-// ---- CORS ----
-const origins = (CORS_ORIGINS || '')
-  .split(',')
-  .map(s => s.trim())
-  .filter(Boolean);
-
-if (ALLOWED_ORIGIN) origins.push(ALLOWED_ORIGIN);
+// ---------- CORS ----------
+const allowed = new Set(
+  (process.env.CORS_ORIGINS || process.env.ALLOWED_ORIGIN || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+);
 
 app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true);
-    cb(null, origins.includes(origin));
+  origin(origin, cb) {
+    // Allow same-origin (no Origin header) and explicit allowlist
+    if (!origin || allowed.has(origin)) return cb(null, true);
+    return cb(new Error('Not allowed by CORS'));
   },
   methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE'],
-  allowedHeaders: ['content-type'],
-  credentials: false,
+  allowedHeaders: ['Content-Type'],
+  maxAge: 86400,
 }));
-app.use(express.json());
 
-// ---- Mail transport (Gmail/Workspace via App Password) ----
-const tx = nodemailer.createTransport({
+app.use(express.json({ limit: '100kb' }));
+
+// ---------- Rate limit ----------
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+app.use('/api/', limiter);
+
+// ---------- Mail transport ----------
+const transporter = nodemailer.createTransport({
   host: 'smtp.gmail.com',
   port: 465,
   secure: true,
-  auth: { user: MAIL_USER, pass: MAIL_PASS },
+  auth: {
+    user: process.env.MAIL_USER,
+    pass: process.env.MAIL_PASS
+  }
 });
 
-// Optional health check:
-app.get('/health', async (req, res) => {
+// Health check for debugging
+app.get('/api/health', async (_req, res) => {
   try {
-    await tx.verify();
+    await transporter.verify();
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -57,105 +71,103 @@ app.get('/health', async (req, res) => {
 });
 
 // ---------- Helpers ----------
-const escape = (s = '') => String(s).replace(/[<>&"]/g, c => (
-  { '<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;' }[c]
-));
+const isEmail = (s='') => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+const clamp = (s, n) => (s || '').slice(0, n).trim();
 
-function notifyHtml({ email, message }) {
-  const safeEmail = escape(email);
-  const safeMsg   = escape(message).replace(/\n/g, '<br/>');
-
-  return `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>New Website Inquiry</title>
-  <style>
-    /* mobile-first */
-    body{margin:0;background:#0b0f14;color:#e5e7eb;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif;}
-    .wrap{max-width:640px;margin:0 auto;padding:28px;}
-    .card{background:#111826;border:1px solid rgba(255,255,255,.08);border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.35);padding:24px;}
-    .brand{display:flex;align-items:center;gap:12px;margin-bottom:14px}
-    .brand img{height:28px;width:28px;border-radius:6px;display:block}
-    h1{font-size:20px;margin:0 0 10px}
-    .muted{color:#94a3b8}
-    .kv{margin:16px 0;border-collapse:separate;border-spacing:0;width:100%}
-    .kv th{width:120px;text-align:left;color:#94a3b8;padding:6px 0;vertical-align:top}
-    .kv td{padding:6px 0}
-    .box{background:#0e1420;border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:14px;margin-top:6px;white-space:pre-wrap}
-    .footer{margin-top:18px;color:#94a3b8;font-size:13px}
-    a{color:#22d3ee;text-decoration:none}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <div class="brand">
-        <img src="https://ticketveriguard.com/img/ticketveriguard.png" alt="TicketVeriGuard">
-        <strong>TicketVeriGuard</strong>
-      </div>
-      <h1>New website inquiry</h1>
-      <table class="kv" role="presentation">
-        <tr><th>From</th><td>${safeEmail}</td></tr>
-        <tr><th>Message</th><td><div class="box">${safeMsg}</div></td></tr>
-      </table>
-      <p class="muted">You can reply directly to this email to contact the sender.</p>
-    </div>
-    <div class="footer">
-      © ${new Date().getFullYear()} TicketVeriGuard • <a href="https://ticketveriguard.com">ticketveriguard.com</a>
-    </div>
-  </div>
-</body>
-</html>`;
-}
-
-function notifyText({ email, message }) {
-  return [
-    'New website inquiry',
-    '',
-    `From: ${email}`,
-    '',
-    'Message:',
-    message || '(no message)',
-    '',
-    `— TicketVeriGuard, ${new Date().getFullYear()}`
-  ].join('\n');
-}
-
-// ---------- Route ----------
+// ---------- Contact endpoint ----------
 app.post('/api/contact', async (req, res) => {
+  const { email, message, website } = req.body || {};
+
+  // Honeypot: if "website" has content, bail silently
+  if (website && String(website).trim().length > 0) {
+    return res.json({ ok: true });
+  }
+
+  const fromEmail = clamp(email, 254);
+  const msg = clamp(message, 4000);
+
+  if (!isEmail(fromEmail)) {
+    return res.status(400).json({ ok: false, error: 'Invalid email.' });
+  }
+  if (!msg) {
+    return res.status(400).json({ ok: false, error: 'Message required.' });
+  }
+
+  // Subject + bodies (plain-first for deliverability)
+  const subject = 'New website inquiry';
+
+  const textBody =
+`New website inquiry
+
+From: ${fromEmail}
+Message:
+${msg}
+
+—
+You can reply directly to this email to contact the sender.
+© ${new Date().getFullYear()} TicketVeriGuard • ticketveriguard.com`;
+
+  // Very light HTML – white background, system fonts, large contrast.
+  // No giant blocks, no images, keeps avatar & Gmail styling intact.
+  const htmlBody = `<!doctype html>
+<html>
+  <body style="margin:0;padding:24px;background:#ffffff;color:#0f1726;font:14px/1.6 -apple-system,Segoe UI,Roboto,Arial,sans-serif">
+    <div style="max-width:640px;margin:0 auto">
+      <h1 style="margin:0 0 12px;font-size:20px;letter-spacing:.2px">New website inquiry</h1>
+      <table role="presentation" cellspacing="0" cellpadding="0" style="width:100%;border-collapse:collapse">
+        <tr>
+          <td style="padding:8px 0;width:96px;color:#475569">From</td>
+          <td style="padding:8px 0"><a href="mailto:${fromEmail}" style="color:#0ea5e9;text-decoration:none">${fromEmail}</a></td>
+        </tr>
+        <tr>
+          <td style="padding:8px 0;color:#475569">Message</td>
+          <td style="padding:8px 0">
+            <div style="padding:12px;border:1px solid #e5e7eb;border-radius:8px;white-space:pre-wrap">${escapeHtml(msg)}</div>
+          </td>
+        </tr>
+      </table>
+
+      <p style="margin:20px 0 0;color:#334155">You can reply directly to this email to contact the sender.</p>
+      <p style="margin:16px 0 0;color:#64748b;font-size:12px">
+        © ${new Date().getFullYear()} TicketVeriGuard •
+        <a href="https://ticketveriguard.com" style="color:#0ea5e9;text-decoration:none">ticketveriguard.com</a>
+      </p>
+    </div>
+  </body>
+</html>`;
+
   try {
-    const { email = '', message = '', website = '' } = req.body || {};
-
-    // simple validations + honeypot
-    if (website) return res.json({ ok: true }); // bot
-    const cleanEmail = String(email).trim();
-    const cleanMsg   = String(message).trim();
-    if (!cleanEmail || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(cleanEmail)) {
-      return res.status(400).json({ ok: false, error: 'Bad email' });
-    }
-    if (!cleanMsg) {
-      return res.status(400).json({ ok: false, error: 'Message required' });
-    }
-
-    // send notification to you
-    await tx.sendMail({
-      from: `${FROM_NAME} <${MAIL_USER}>`,
-      to: RCPT_TO,
-      subject: 'New website inquiry',
-      html: notifyHtml({ email: cleanEmail, message: cleanMsg }),
-      text: notifyText({ email: cleanEmail, message: cleanMsg }),
-      replyTo: cleanEmail,
-      headers: { 'X-TVG-Source': 'web-contact' }
+    // From header uses your Workspace account & clean brand name
+    await transporter.sendMail({
+      from: `"${process.env.FROM_NAME || 'TicketVeriGuard'}" <${process.env.MAIL_USER}>`,
+      to: process.env.RCPT_TO || process.env.MAIL_USER,
+      replyTo: fromEmail, // makes reply flow natural
+      subject,
+      text: textBody,
+      html: htmlBody
     });
 
     res.json({ ok: true });
-  } catch (e) {
-    console.error(e);
+  } catch (err) {
+    console.error('Mail send error:', err);
     res.status(500).json({ ok: false, error: 'Mail send failed.' });
   }
 });
 
-app.listen(PORT, () =>
-  console.log(`contact API listening on :${PORT}`)
-);
+// ---------- Root ----------
+app.get('/', (_req, res) => {
+  res.status(404).send('Not found.');
+});
+
+const port = process.env.PORT || 3001;
+app.listen(port, () => {
+  console.log('TVG Contact API listening on', port);
+});
+
+// Escape utility for HTML injection safety in <div>
+function escapeHtml(str = '') {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
