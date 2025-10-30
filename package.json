@@ -3,12 +3,15 @@
   "version": "1.0.0",
   "private": true,
   "type": "commonjs",
-  "engines": { "node": "22.x", "npm": "10.x" },
+  "engines": {
+    "node": "22.x",
+    "npm": "10.x"
+  },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.19.2",
     "express-rate-limit": "^7.1.5",
-    "nodemailer": "^6.9.14"
+    "nodemailer": "^7.0.10"
   },
   "scripts": {
     "start": "node server.js",
