@@ -1,212 +1,161 @@
 // server.js
-// Minimal contact API for TicketVeriGuard — HTML email + auto-reply
-// Env: MAIL_USER, MAIL_PASS, RCPT_TO, (optional) FROM_NAME, CORS_ORIGINS
-
 const express = require('express');
-const rateLimit = require('express-rate-limit');
 const cors = require('cors');
 const nodemailer = require('nodemailer');
 
+const {
+  PORT = 3001,
+  MAIL_USER,
+  MAIL_PASS,
+  RCPT_TO,
+  FROM_NAME = 'TicketVeriGuard',
+  ALLOWED_ORIGIN,
+  CORS_ORIGINS = ''
+} = process.env;
+
+if (!MAIL_USER || !MAIL_PASS || !RCPT_TO) {
+  console.error('Missing MAIL_USER/MAIL_PASS/RCPT_TO envs');
+}
+
 const app = express();
 
-// --- Config ---
-const PORT = process.env.PORT || 3000;
-const FROM_EMAIL = process.env.MAIL_USER;                   // hello@ticketveriguard.com
-const FROM_NAME  = process.env.FROM_NAME || 'TicketVeriGuard';
-const RCPT_TO    = process.env.RCPT_TO || FROM_EMAIL;       // where you receive the lead
+// ---- CORS ----
+const origins = (CORS_ORIGINS || '')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
 
-// CORS: allow your site + localhost during dev
-const allowed = (process.env.CORS_ORIGINS || [
-  'https://ticketveriguard.com',
-  'https://www.ticketveriguard.com',
-  'http://localhost:5500',
-  'http://127.0.0.1:5500'
-]).split(',').map(s => s.trim());
+if (ALLOWED_ORIGIN) origins.push(ALLOWED_ORIGIN);
 
 app.use(cors({
-  origin(origin, cb){
-    if (!origin) return cb(null, true); // curl/postman
-    cb(null, allowed.includes(origin));
-  }
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true);
+    cb(null, origins.includes(origin));
+  },
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE'],
+  allowedHeaders: ['content-type'],
+  credentials: false,
 }));
-app.use(express.json({ limit: '100kb' }));
+app.use(express.json());
 
-// simple rate limit to avoid abuse
-app.use('/api/contact', rateLimit({
-  windowMs: 60 * 1000,
-  max: 5
-}));
-
-// --- Mail Transport (Gmail SMTP with App Password) ---
-const transporter = nodemailer.createTransport({
+// ---- Mail transport (Gmail/Workspace via App Password) ----
+const tx = nodemailer.createTransport({
   host: 'smtp.gmail.com',
   port: 465,
   secure: true,
-  auth: { user: process.env.MAIL_USER, pass: process.env.MAIL_PASS }
+  auth: { user: MAIL_USER, pass: MAIL_PASS },
 });
 
-// --- Email Template Helper ---
-function renderEmail({ fromEmail, msg }) {
-  const brand = FROM_NAME;
-  const site  = 'https://ticketveriguard.com';
-  const support = FROM_EMAIL;
+// Optional health check:
+app.get('/health', async (req, res) => {
+  try {
+    await tx.verify();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
 
-  const html = `
-<!doctype html>
+// ---------- Helpers ----------
+const escape = (s = '') => String(s).replace(/[<>&"]/g, c => (
+  { '<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;' }[c]
+));
+
+function notifyHtml({ email, message }) {
+  const safeEmail = escape(email);
+  const safeMsg   = escape(message).replace(/\n/g, '<br/>');
+
+  return `<!doctype html>
 <html>
-<head><meta name="viewport" content="width=device-width,initial-scale=1"/><meta charSet="utf-8"/><title>New website inquiry</title></head>
-<body style="margin:0;background:#0d1119;color:#e5e7eb;font:16px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:24px 0;">
-    <tr><td align="center">
-      <table role="presentation" width="600" cellpadding="0" cellspacing="0"
-             style="width:100%;max-width:640px;background:#111826;border:1px solid #1f2937;border-radius:14px;overflow:hidden">
-        <tr>
-          <td style="padding:18px 22px;background:linear-gradient(90deg,rgba(79,70,229,.9),rgba(34,211,238,.9));color:#fff;font-weight:700;">
-            ${brand}
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:22px">
-            <p style="margin:0 0 10px;color:#94a3b8;font-size:14px">New website inquiry</p>
-            <p style="margin:0 0 12px">From: <strong style="color:#e5e7eb">${fromEmail}</strong></p>
-            <div style="background:#0e1420;border:1px solid #1f2937;border-radius:10px;padding:14px;color:#e5e7eb;white-space:pre-wrap">
-${(msg || '').trim()}
-            </div>
-            <p style="margin:18px 0 0">Reply directly to this email to continue the conversation.</p>
-            <div style="margin:22px 0 6px;height:1px;background:#1f2937"></div>
-            <p style="margin:12px 0 0">
-              — TicketVeriGuard<br/>
-              <a href="mailto:${support}" style="color:#22d3ee;text-decoration:none">${support}</a> ·
-              <a href="${site}" style="color:#22d3ee;text-decoration:none">ticketveriguard.com</a>
-            </p>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:14px 22px;color:#94a3b8;font-size:12px;border-top:1px solid #1f2937">
-            You’re receiving this because someone submitted the contact form on ticketveriguard.com.
-          </td>
-        </tr>
+<head>
+  <meta charset="utf-8">
+  <title>New Website Inquiry</title>
+  <style>
+    /* mobile-first */
+    body{margin:0;background:#0b0f14;color:#e5e7eb;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,sans-serif;}
+    .wrap{max-width:640px;margin:0 auto;padding:28px;}
+    .card{background:#111826;border:1px solid rgba(255,255,255,.08);border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.35);padding:24px;}
+    .brand{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+    .brand img{height:28px;width:28px;border-radius:6px;display:block}
+    h1{font-size:20px;margin:0 0 10px}
+    .muted{color:#94a3b8}
+    .kv{margin:16px 0;border-collapse:separate;border-spacing:0;width:100%}
+    .kv th{width:120px;text-align:left;color:#94a3b8;padding:6px 0;vertical-align:top}
+    .kv td{padding:6px 0}
+    .box{background:#0e1420;border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:14px;margin-top:6px;white-space:pre-wrap}
+    .footer{margin-top:18px;color:#94a3b8;font-size:13px}
+    a{color:#22d3ee;text-decoration:none}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="brand">
+        <img src="https://ticketveriguard.com/img/ticketveriguard.png" alt="TicketVeriGuard">
+        <strong>TicketVeriGuard</strong>
+      </div>
+      <h1>New website inquiry</h1>
+      <table class="kv" role="presentation">
+        <tr><th>From</th><td>${safeEmail}</td></tr>
+        <tr><th>Message</th><td><div class="box">${safeMsg}</div></td></tr>
       </table>
-    </td></tr>
-  </table>
+      <p class="muted">You can reply directly to this email to contact the sender.</p>
+    </div>
+    <div class="footer">
+      © ${new Date().getFullYear()} TicketVeriGuard • <a href="https://ticketveriguard.com">ticketveriguard.com</a>
+    </div>
+  </div>
 </body>
-</html>`.trim();
-
-  const text = [
-    `New website inquiry`,
-    ``,
-    `From: ${fromEmail}`,
-    ``,
-    (msg || '').trim(),
-    ``,
-    `— TicketVeriGuard`,
-    `Email: ${support}`,
-    `Web: ${site}`,
-  ].join('\n');
-
-  return { html, text };
+</html>`;
 }
 
-function renderAutoReply({ toEmail }) {
-  const site  = 'https://ticketveriguard.com';
-  const support = FROM_EMAIL;
-
-  const html = `
-<!doctype html>
-<html>
-<head><meta name="viewport" content="width=device-width,initial-scale=1"/><meta charSet="utf-8"/><title>Thanks — we got your message</title></head>
-<body style="margin:0;background:#0d1119;color:#e5e7eb;font:16px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial;">
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="padding:24px 0;">
-    <tr><td align="center">
-      <table role="presentation" width="600" cellpadding="0" cellspacing="0"
-             style="width:100%;max-width:640px;background:#111826;border:1px solid #1f2937;border-radius:14px;overflow:hidden">
-        <tr>
-          <td style="padding:18px 22px;background:linear-gradient(90deg,rgba(79,70,229,.9),rgba(34,211,238,.9));color:#fff;font-weight:700;">
-            TicketVeriGuard
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:22px">
-            <p style="margin:0 0 12px">Thanks — we got your message.</p>
-            <p style="margin:0 0 12px">We’ll reply shortly with next steps and a quick demo option.</p>
-            <p style="margin:18px 0 0;color:#94a3b8;font-size:14px">If this was not you, ignore this email or write us at
-            <a href="mailto:${support}" style="color:#22d3ee;text-decoration:none">${support}</a>.</p>
-
-            <div style="margin:22px 0 6px;height:1px;background:#1f2937"></div>
-            <p style="margin:12px 0 0">
-              — TicketVeriGuard<br/>
-              <a href="mailto:${support}" style="color:#22d3ee;text-decoration:none">${support}</a> ·
-              <a href="${site}" style="color:#22d3ee;text-decoration:none">ticketveriguard.com</a>
-            </p>
-          </td>
-        </tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`.trim();
-
-  const text = [
-    `Thanks — we got your message.`,
-    `We’ll reply shortly with next steps and a quick demo option.`,
-    ``,
-    `— TicketVeriGuard`,
-    `Email: ${support}`,
-    `Web: ${site}`
+function notifyText({ email, message }) {
+  return [
+    'New website inquiry',
+    '',
+    `From: ${email}`,
+    '',
+    'Message:',
+    message || '(no message)',
+    '',
+    `— TicketVeriGuard, ${new Date().getFullYear()}`
   ].join('\n');
-
-  return { html, text };
 }
 
-// --- Routes ---
-app.get('/', (_, res) => res.status(404).json({ ok: false, error: 'Not found' }));
-
+// ---------- Route ----------
 app.post('/api/contact', async (req, res) => {
   try {
-    const { email, message, website } = req.body || {};
-    // Honeypot and minimal validation
-    if (website) return res.status(200).json({ ok: true }); // bot
-    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-      return res.status(400).json({ ok: false, error: 'Invalid email' });
+    const { email = '', message = '', website = '' } = req.body || {};
+
+    // simple validations + honeypot
+    if (website) return res.json({ ok: true }); // bot
+    const cleanEmail = String(email).trim();
+    const cleanMsg   = String(message).trim();
+    if (!cleanEmail || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(cleanEmail)) {
+      return res.status(400).json({ ok: false, error: 'Bad email' });
     }
-    if (!message || String(message).trim().length < 2) {
+    if (!cleanMsg) {
       return res.status(400).json({ ok: false, error: 'Message required' });
     }
 
-    // 1) Notify you
-    const { html, text } = renderEmail({ fromEmail: email, msg: message });
-    await transporter.sendMail({
-      from: `${FROM_NAME} <${FROM_EMAIL}>`,
+    // send notification to you
+    await tx.sendMail({
+      from: `${FROM_NAME} <${MAIL_USER}>`,
       to: RCPT_TO,
-      replyTo: email,
-      subject: `New website inquiry from ${email}`,
-      html,
-      text,
-      headers: {
-        'X-Entity-Ref-ID': Date.now().toString(),
-        'List-Unsubscribe': `<mailto:${FROM_EMAIL}?subject=unsubscribe>`
-      }
-    });
-
-    // 2) Auto-reply to visitor (polished but short)
-    const auto = renderAutoReply({ toEmail: email });
-    await transporter.sendMail({
-      from: `${FROM_NAME} <${FROM_EMAIL}>`,
-      to: email,
-      subject: `Thanks — we received your message`,
-      html: auto.html,
-      text: auto.text,
-      headers: { 'X-Auto-Response-Suppress': 'All' }
+      subject: 'New website inquiry',
+      html: notifyHtml({ email: cleanEmail, message: cleanMsg }),
+      text: notifyText({ email: cleanEmail, message: cleanMsg }),
+      replyTo: cleanEmail,
+      headers: { 'X-TVG-Source': 'web-contact' }
     });
 
     res.json({ ok: true });
   } catch (e) {
-    console.error('MAIL ERROR:', e);
+    console.error(e);
     res.status(500).json({ ok: false, error: 'Mail send failed.' });
   }
 });
 
-// --- Start ---
-app.listen(PORT, () => {
-  console.log(`tvg-contact listening on ${PORT}`);
-});
+app.listen(PORT, () =>
+  console.log(`contact API listening on :${PORT}`)
+);
